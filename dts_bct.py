@@ -9,7 +9,7 @@ from datetime import datetime
 import io
 
 st.set_page_config(
-    page_title="Bed Capacity Planning Tool",
+    page_title="NUHS Bed Capacity Planning",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -48,16 +48,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Initialize session state
-if 'population_data' not in st.session_state:
-    st.session_state.population_data = None
-if 'admission_data' not in st.session_state:
-    st.session_state.admission_data = None
-if 'alos_data' not in st.session_state:
-    st.session_state.alos_data = None
-if 'supply_data' not in st.session_state:
-    st.session_state.supply_data = None
-if 'optimization_results' not in st.session_state:
-    st.session_state.optimization_results = None
+def initialize_session_state():
+    if 'population_data' not in st.session_state:
+        st.session_state.population_data = None
+    if 'admission_data' not in st.session_state:
+        st.session_state.admission_data = None
+    if 'alos_data' not in st.session_state:
+        st.session_state.alos_data = None
+    if 'supply_data' not in st.session_state:
+        st.session_state.supply_data = None
+    if 'optimization_results' not in st.session_state:
+        st.session_state.optimization_results = None
+    if 'current_granularity' not in st.session_state:
+        st.session_state.current_granularity = "Age Band + MDC"
+
+initialize_session_state()
 
 def generate_sample_population_data():
     years = [2020, 2025, 2030, 2035, 2040]
@@ -89,7 +94,7 @@ def generate_sample_population_data():
     
     return pd.DataFrame(rows)
 
-def generate_sample_admission_data():
+def generate_sample_admission_data(granularity):
     mdc_groups = ['Cardiovascular', 'Respiratory', 'Digestive', 'Musculoskeletal', 'Nervous System', 'Endocrine']
     age_bands = ['Age_0_5', 'Age_6_40', 'Age_41_60', 'Age_61_70', 'Age_71_80']
     genders = ['Male', 'Female']
@@ -101,19 +106,36 @@ def generate_sample_admission_data():
         ('Respiratory', 'Age_61_70'): 20, ('Respiratory', 'Age_71_80'): 35,
         ('Digestive', 'Age_0_5'): 3, ('Digestive', 'Age_6_40'): 7, ('Digestive', 'Age_41_60'): 12,
         ('Digestive', 'Age_61_70'): 18, ('Digestive', 'Age_71_80'): 25,
+        ('Musculoskeletal', 'Age_0_5'): 1, ('Musculoskeletal', 'Age_6_40'): 4, ('Musculoskeletal', 'Age_41_60'): 8,
+        ('Musculoskeletal', 'Age_61_70'): 15, ('Musculoskeletal', 'Age_71_80'): 20,
+        ('Nervous System', 'Age_0_5'): 2, ('Nervous System', 'Age_6_40'): 2, ('Nervous System', 'Age_41_60'): 5,
+        ('Nervous System', 'Age_61_70'): 10, ('Nervous System', 'Age_71_80'): 15,
+        ('Endocrine', 'Age_0_5'): 1, ('Endocrine', 'Age_6_40'): 3, ('Endocrine', 'Age_41_60'): 6,
+        ('Endocrine', 'Age_61_70'): 8, ('Endocrine', 'Age_71_80'): 12
     }
     
     rows = []
-    for mdc in mdc_groups:
+    
+    if granularity == "Age Band + MDC":
+        for mdc in mdc_groups:
+            for age_band in age_bands:
+                for gender in genders:
+                    base_rate = base_rates.get((mdc, age_band), 5)
+                    rate = base_rate * (1.1 if gender == 'Male' and mdc == 'Cardiovascular' else 1.0)
+                    rows.append({'MDC_Group': mdc, 'Age_Band': age_band, 'Gender': gender, 'Admission_Rate': rate})
+    else:  # Age Band Only
         for age_band in age_bands:
             for gender in genders:
-                base_rate = base_rates.get((mdc, age_band), 5)
-                rate = base_rate * (1.1 if gender == 'Male' and mdc == 'Cardiovascular' else 1.0)
-                rows.append({'MDC_Group': mdc, 'Age_Band': age_band, 'Gender': gender, 'Admission_Rate': rate})
+                total_rate = 0
+                for mdc in mdc_groups:
+                    base_rate = base_rates.get((mdc, age_band), 5)
+                    rate = base_rate * (1.1 if gender == 'Male' and mdc == 'Cardiovascular' else 1.0)
+                    total_rate += rate
+                rows.append({'Age_Band': age_band, 'Gender': gender, 'Admission_Rate': total_rate})
     
     return pd.DataFrame(rows)
 
-def generate_sample_alos_data():
+def generate_sample_alos_data(granularity):
     mdc_groups = ['Cardiovascular', 'Respiratory', 'Digestive', 'Musculoskeletal', 'Nervous System', 'Endocrine']
     age_bands = ['Age_0_5', 'Age_6_40', 'Age_41_60', 'Age_61_70', 'Age_71_80']
     genders = ['Male', 'Female']
@@ -124,13 +146,31 @@ def generate_sample_alos_data():
     }
     
     rows = []
-    for mdc in mdc_groups:
+    
+    if granularity == "Age Band + MDC":
+        for mdc in mdc_groups:
+            for age_band in age_bands:
+                for gender in genders:
+                    alos = base_alos[mdc]
+                    if age_band in ['Age_61_70', 'Age_71_80']:
+                        alos += 1
+                    rows.append({'MDC_Group': mdc, 'Age_Band': age_band, 'Gender': gender, 'ALOS': alos})
+    else:  # Age Band Only - weighted average ALOS
         for age_band in age_bands:
             for gender in genders:
-                alos = base_alos[mdc]
-                if age_band in ['Age_61_70', 'Age_71_80']:
-                    alos += 1
-                rows.append({'MDC_Group': mdc, 'Age_Band': age_band, 'Gender': gender, 'ALOS': alos})
+                weighted_alos = 0
+                total_weight = 0
+                for mdc in mdc_groups:
+                    alos = base_alos[mdc]
+                    if age_band in ['Age_61_70', 'Age_71_80']:
+                        alos += 1
+                    # Use admission rates as weights
+                    weight = 10  # Default weight
+                    weighted_alos += alos * weight
+                    total_weight += weight
+                
+                avg_alos = round(weighted_alos / total_weight, 1) if total_weight > 0 else 4.0
+                rows.append({'Age_Band': age_band, 'Gender': gender, 'ALOS': avg_alos})
     
     return pd.DataFrame(rows)
 
@@ -163,6 +203,73 @@ def generate_sample_supply_data():
         supply_data.append(row)
     
     return pd.DataFrame(supply_data)
+
+def check_granularity_change(new_granularity):
+    """Check if granularity has changed and regenerate sample data if needed"""
+    if st.session_state.current_granularity != new_granularity:
+        st.session_state.current_granularity = new_granularity
+        
+        # Only regenerate if using sample data (not uploaded data)
+        if st.session_state.admission_data is not None:
+            # Check if data looks like sample data by checking if it has expected structure
+            expected_mdc_groups = {'Cardiovascular', 'Respiratory', 'Digestive', 'Musculoskeletal', 'Nervous System', 'Endocrine'}
+            
+            if new_granularity == "Age Band + MDC":
+                if 'MDC_Group' not in st.session_state.admission_data.columns:
+                    # Need to regenerate for MDC granularity
+                    st.session_state.admission_data = generate_sample_admission_data(new_granularity)
+                    st.session_state.alos_data = generate_sample_alos_data(new_granularity)
+            else:  # Age Band Only
+                if 'MDC_Group' in st.session_state.admission_data.columns:
+                    # Need to regenerate for age band only granularity
+                    st.session_state.admission_data = generate_sample_admission_data(new_granularity)
+                    st.session_state.alos_data = generate_sample_alos_data(new_granularity)
+
+def create_editable_dataframe(df, key, height=300):
+    """Create an editable dataframe using st.data_editor"""
+    if df is not None:
+        # Configure column types for better editing experience
+        column_config = {}
+        
+        for col in df.columns:
+            if col in ['Population', 'Admission_Rate', 'ALOS'] or col.startswith('Beds_'):
+                column_config[col] = st.column_config.NumberColumn(
+                    min_value=0,
+                    step=1 if col == 'Population' or col.startswith('Beds_') else 0.1,
+                    format="%.0f" if col == 'Population' or col.startswith('Beds_') else "%.1f"
+                )
+            elif col in ['Year']:
+                column_config[col] = st.column_config.SelectboxColumn(
+                    options=[2020, 2025, 2030, 2035, 2040]
+                )
+            elif col in ['Age_Band']:
+                column_config[col] = st.column_config.SelectboxColumn(
+                    options=['Age_0_5', 'Age_6_40', 'Age_41_60', 'Age_61_70', 'Age_71_80']
+                )
+            elif col in ['Gender']:
+                column_config[col] = st.column_config.SelectboxColumn(
+                    options=['Male', 'Female']
+                )
+            elif col in ['MDC_Group']:
+                column_config[col] = st.column_config.SelectboxColumn(
+                    options=['Cardiovascular', 'Respiratory', 'Digestive', 'Musculoskeletal', 'Nervous System', 'Endocrine']
+                )
+            elif col in ['Type']:
+                column_config[col] = st.column_config.SelectboxColumn(
+                    options=['Public', 'Private']
+                )
+        
+        edited_df = st.data_editor(
+            df,
+            use_container_width=True,
+            height=height,
+            num_rows="dynamic",
+            column_config=column_config,
+            key=key
+        )
+        
+        return edited_df
+    return None
 
 def calculate_demand_from_population(population_df, admission_df, alos_df, target_year, granularity):
     pop_df = population_df[population_df['Year'] == target_year]
@@ -203,29 +310,26 @@ def calculate_demand_from_population(population_df, admission_df, alos_df, targe
             gender = pop_row['Gender']
             population = pop_row['Population']
             
-            total_patient_days = 0
-            for mdc in admission_df['MDC_Group'].unique():
-                adm_row = admission_df[
-                    (admission_df['MDC_Group'] == mdc) & 
-                    (admission_df['Age_Band'] == age_band) & 
-                    (admission_df['Gender'] == gender)
-                ]
-                alos_row = alos_df[
-                    (alos_df['MDC_Group'] == mdc) & 
-                    (alos_df['Age_Band'] == age_band) & 
-                    (alos_df['Gender'] == gender)
-                ]
-                
-                if not adm_row.empty and not alos_row.empty:
-                    admission_rate = adm_row['Admission_Rate'].values[0] / 1000
-                    alos = alos_row['ALOS'].values[0]
-                    total_patient_days += population * admission_rate * alos
+            # Find matching admission and alos data
+            adm_row = admission_df[
+                (admission_df['Age_Band'] == age_band) & 
+                (admission_df['Gender'] == gender)
+            ]
+            alos_row = alos_df[
+                (alos_df['Age_Band'] == age_band) & 
+                (alos_df['Gender'] == gender)
+            ]
             
-            demand_rows.append({
-                'Age_Band': age_band,
-                'Gender': gender,
-                'Patient_Days': int(total_patient_days)
-            })
+            if not adm_row.empty and not alos_row.empty:
+                admission_rate = adm_row['Admission_Rate'].values[0] / 1000
+                alos = alos_row['ALOS'].values[0]
+                patient_days = population * admission_rate * alos
+                
+                demand_rows.append({
+                    'Age_Band': age_band,
+                    'Gender': gender,
+                    'Patient_Days': int(patient_days)
+                })
     
     return pd.DataFrame(demand_rows)
 
@@ -538,7 +642,7 @@ def create_demand_supply_charts(population_df, admission_df, alos_df, supply_df,
     return fig
 
 def main():
-    st.title("🏥 Bed Capacity Planning Tool")
+    st.title("🏥 NUHS Bed Capacity Planning Tool")
     st.markdown("**Advanced demand-supply mapping with dual MILP solvers for bed capacity planning in Western Singapore**")
     
     # Sidebar
@@ -556,6 +660,9 @@ def main():
         ["Age Band + MDC", "Age Band Only"],
         help="Age Band + MDC: Detailed by medical conditions | Age Band Only: Aggregated across all conditions"
     )
+    
+    # Check for granularity change and update data accordingly
+    check_granularity_change(granularity)
     
     # Navigation
     st.sidebar.markdown("---")
@@ -583,8 +690,8 @@ def main():
             if st.button("🚀 Load Sample Data", type="primary"):
                 with st.spinner("Loading sample data..."):
                     st.session_state.population_data = generate_sample_population_data()
-                    st.session_state.admission_data = generate_sample_admission_data()
-                    st.session_state.alos_data = generate_sample_alos_data()
+                    st.session_state.admission_data = generate_sample_admission_data(granularity)
+                    st.session_state.alos_data = generate_sample_alos_data(granularity)
                     st.session_state.supply_data = generate_sample_supply_data()
                 st.success("✅ Sample data loaded successfully!")
         
@@ -602,7 +709,10 @@ def main():
                     st.success("Population data uploaded!")
                 
                 st.markdown("**🏥 Admission Rates Data**")
-                st.caption(f"Required: {'MDC_Group, ' if granularity == 'Age Band + MDC' else ''}Age_Band, Gender, Admission_Rate")
+                if granularity == "Age Band + MDC":
+                    st.caption("Required: MDC_Group, Age_Band, Gender, Admission_Rate")
+                else:
+                    st.caption("Required: Age_Band, Gender, Admission_Rate")
                 admission_file = st.file_uploader("Upload admission rates CSV", type=['csv'], key="admission_upload")
                 if admission_file:
                     st.session_state.admission_data = pd.read_csv(admission_file)
@@ -610,7 +720,10 @@ def main():
             
             with col2:
                 st.markdown("**📊 ALOS Data**")
-                st.caption(f"Required: {'MDC_Group, ' if granularity == 'Age Band + MDC' else ''}Age_Band, Gender, ALOS")
+                if granularity == "Age Band + MDC":
+                    st.caption("Required: MDC_Group, Age_Band, Gender, ALOS")
+                else:
+                    st.caption("Required: Age_Band, Gender, ALOS")
                 alos_file = st.file_uploader("Upload ALOS CSV", type=['csv'], key="alos_upload")
                 if alos_file:
                     st.session_state.alos_data = pd.read_csv(alos_file)
@@ -623,28 +736,65 @@ def main():
                     st.session_state.supply_data = pd.read_csv(supply_file)
                     st.success("Supply data uploaded!")
         
-        # Display data
+        # Display and edit data
         if st.session_state.population_data is not None:
             st.subheader("👥 Population Data")
-            st.caption("Units: Number of people")
-            edited_pop = st.data_editor(st.session_state.population_data, use_container_width=True, key="pop_editor")
-            st.session_state.population_data = edited_pop
+            st.caption("Edit the data directly in the table below. You can add/remove rows and modify values.")
+            edited_pop_data = create_editable_dataframe(
+                st.session_state.population_data, 
+                key="pop_editor",
+                height=400
+            )
+            if edited_pop_data is not None:
+                st.session_state.population_data = edited_pop_data
+        
         if st.session_state.admission_data is not None:
-            st.subheader("🏥 Admission Rates")
-            st.caption("Units: Admissions per 1,000 population per year")
-            edited_admission = st.data_editor(st.session_state.admission_data, use_container_width=True, key="admission_editor")
-            st.session_state.admission_data = edited_admission
+            st.subheader("🏥 Admission Rates Data")
+            st.caption(f"Admission rates per 1000 population. Current granularity: {granularity}")
+            edited_admission_data = create_editable_dataframe(
+                st.session_state.admission_data,
+                key="admission_editor", 
+                height=400
+            )
+            if edited_admission_data is not None:
+                st.session_state.admission_data = edited_admission_data
+        
         if st.session_state.alos_data is not None:
-            st.subheader("📊 Average Length of Stay (ALOS)")
-            st.caption("Units: Days per admission")
-            edited_alos = st.data_editor(st.session_state.alos_data, use_container_width=True, key="alos_editor")
-            st.session_state.alos_data = edited_alos
+            st.subheader("📊 ALOS Data")
+            st.caption(f"Average Length of Stay in days. Current granularity: {granularity}")
+            edited_alos_data = create_editable_dataframe(
+                st.session_state.alos_data,
+                key="alos_editor",
+                height=400
+            )
+            if edited_alos_data is not None:
+                st.session_state.alos_data = edited_alos_data
+        
         if st.session_state.supply_data is not None:
-            st.subheader("🏨 Bed Supply Data")
-            st.caption("Units: Number of beds")
-            edited_supply = st.data_editor(st.session_state.supply_data, use_container_width=True, key="supply_editor")
-            st.session_state.supply_data = edited_supply
-
+            st.subheader("🏨 Supply Data")
+            st.caption("Hospital bed capacity by year. Edit values to test different scenarios.")
+            edited_supply_data = create_editable_dataframe(
+                st.session_state.supply_data,
+                key="supply_editor",
+                height=300
+            )
+            if edited_supply_data is not None:
+                st.session_state.supply_data = edited_supply_data
+        
+        # Show data validation warnings
+        if st.session_state.population_data is not None:
+            # Check for missing years
+            required_years = [2020, 2025, 2030, 2035, 2040]
+            available_years = sorted(st.session_state.population_data['Year'].unique())
+            missing_years = [y for y in required_years if y not in available_years]
+            
+            if missing_years:
+                st.warning(f"⚠️ Missing population data for years: {missing_years}")
+            
+            # Check for negative values
+            if (st.session_state.population_data['Population'] < 0).any():
+                st.error("❌ Population data contains negative values!")
+    
     elif page == "📈 Demand & Supply Analysis":
         st.header("📈 Demand & Supply Analysis")
         
@@ -666,23 +816,31 @@ def main():
         analysis_year = st.selectbox("Select Year for Analysis:", [2020, 2025, 2030, 2035, 2040])
         
         # Calculate demand
-        demand_df = calculate_demand_from_population(
-            st.session_state.population_data,
-            st.session_state.admission_data,
-            st.session_state.alos_data,
-            analysis_year,
-            granularity
-        )
+        try:
+            demand_df = calculate_demand_from_population(
+                st.session_state.population_data,
+                st.session_state.admission_data,
+                st.session_state.alos_data,
+                analysis_year,
+                granularity
+            )
+        except Exception as e:
+            st.error(f"❌ Error calculating demand: {str(e)}")
+            st.info("Please check that your data has the correct structure for the selected granularity.")
+            return
         
         # Overview charts
-        overview_fig = create_demand_supply_charts(
-            st.session_state.population_data,
-            st.session_state.admission_data,
-            st.session_state.alos_data,
-            st.session_state.supply_data,
-            granularity
-        )
-        st.plotly_chart(overview_fig, use_container_width=True)
+        try:
+            overview_fig = create_demand_supply_charts(
+                st.session_state.population_data,
+                st.session_state.admission_data,
+                st.session_state.alos_data,
+                st.session_state.supply_data,
+                granularity
+            )
+            st.plotly_chart(overview_fig, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Could not generate overview charts: {str(e)}")
         
         col1, col2 = st.columns(2)
         
@@ -690,20 +848,23 @@ def main():
             st.subheader(f"📊 Demand Analysis ({analysis_year})")
             st.caption("Units: Patient days per year")
             
-            st.dataframe(demand_df.style.format({'Patient_Days': '{:,.0f}'}), use_container_width=True)
-            
-            if granularity == "Age Band + MDC":
-                fig_demand = px.bar(demand_df, x='MDC_Group', y='Patient_Days', color='Age_Band',
-                               title=f'Demand by MDC and Age Band ({analysis_year})',
-                               color_discrete_sequence=px.colors.qualitative.Set3)
-                fig_demand.update_layout(xaxis_tickangle=45)
+            if not demand_df.empty:
+                st.dataframe(demand_df.style.format({'Patient_Days': '{:,.0f}'}), use_container_width=True)
+                
+                if granularity == "Age Band + MDC":
+                    fig_demand = px.bar(demand_df, x='MDC_Group', y='Patient_Days', color='Age_Band',
+                                   title=f'Demand by MDC and Age Band ({analysis_year})',
+                                   color_discrete_sequence=px.colors.qualitative.Set3)
+                    fig_demand.update_layout(xaxis_tickangle=45)
+                else:
+                    fig_demand = px.bar(demand_df, x='Age_Band', y='Patient_Days', color='Gender',
+                                   title=f'Demand by Age Band and Gender ({analysis_year})',
+                                   color_discrete_sequence=['lightblue', 'pink'])
+                    fig_demand.update_layout(xaxis_tickangle=45)
+                
+                st.plotly_chart(fig_demand, use_container_width=True)
             else:
-                fig_demand = px.bar(demand_df, x='Age_Band', y='Patient_Days', color='Gender',
-                               title=f'Demand by Age Band and Gender ({analysis_year})',
-                               color_discrete_sequence=['lightblue', 'pink'])
-                fig_demand.update_layout(xaxis_tickangle=45)
-            
-            st.plotly_chart(fig_demand, use_container_width=True)
+                st.warning("No demand data calculated. Please check your input data.")
         
         with col2:
             st.subheader(f"🏨 Supply Analysis ({analysis_year})")
@@ -744,7 +905,7 @@ def main():
         # Gap analysis
         st.subheader("📊 Supply-Demand Gap Analysis")
         
-        if supply_col in st.session_state.supply_data.columns:
+        if supply_col in st.session_state.supply_data.columns and not demand_df.empty:
             total_demand = demand_df['Patient_Days'].sum()
             total_supply = st.session_state.supply_data[supply_col].sum() * 365
             effective_supply_85 = total_supply * 0.85
@@ -846,6 +1007,10 @@ def main():
                         granularity
                     )
                     
+                    if demand_df.empty:
+                        st.error("❌ No demand data calculated. Please check your input data.")
+                        return
+                    
                     if solver_type == "Demand Fulfillment (Min-Max BOR)":
                         results = solve_demand_fulfillment(demand_df, st.session_state.supply_data, 
                                                          target_year, target_bor, granularity)
@@ -864,6 +1029,7 @@ def main():
                 
                 except Exception as e:
                     st.error(f"❌ Optimization error: {str(e)}")
+                    st.info("Please check that your data structure matches the selected granularity.")
         
         # Results display
         if st.session_state.optimization_results is not None:
@@ -909,17 +1075,20 @@ def main():
                     
                     with metric_cols[3]:
                         # Calculate utilization rate
-                        demand_df = calculate_demand_from_population(
-                            st.session_state.population_data,
-                            st.session_state.admission_data,
-                            st.session_state.alos_data,
-                            target_year,
-                            granularity
-                        )
-                        total_demand = demand_df['Patient_Days'].sum()
-                        utilization_rate = (results['total_served'] / total_demand * 100) if total_demand > 0 else 0
-                        st.metric("Demand Utilization", f"{utilization_rate:.1f}%",
-                                help="Percentage of total demand being served")
+                        try:
+                            demand_df = calculate_demand_from_population(
+                                st.session_state.population_data,
+                                st.session_state.admission_data,
+                                st.session_state.alos_data,
+                                target_year,
+                                granularity
+                            )
+                            total_demand = demand_df['Patient_Days'].sum()
+                            utilization_rate = (results['total_served'] / total_demand * 100) if total_demand > 0 else 0
+                            st.metric("Demand Utilization", f"{utilization_rate:.1f}%",
+                                    help="Percentage of total demand being served")
+                        except:
+                            st.metric("Demand Utilization", "N/A")
                 
                 # Hospital BOR analysis
                 st.subheader("🏥 Hospital BOR Analysis")
@@ -1036,88 +1205,95 @@ def main():
                     
                     # Allocation heatmap
                     if len(allocation_data) > 1:
-                        fig_heatmap = px.imshow(
-                            allocation_df.set_index('Category')[hospital_cols].values,
-                            x=hospital_cols,
-                            y=allocation_df['Category'],
-                            color_continuous_scale='Blues',
-                            title='Allocation Heatmap (Patient Days)',
-                            aspect='auto'
-                        )
-                        fig_heatmap.update_layout(height=400)
-                        st.plotly_chart(fig_heatmap, use_container_width=True)
+                        try:
+                            fig_heatmap = px.imshow(
+                                allocation_df.set_index('Category')[hospital_cols].values,
+                                x=hospital_cols,
+                                y=allocation_df['Category'],
+                                color_continuous_scale='Blues',
+                                title='Allocation Heatmap (Patient Days)',
+                                aspect='auto'
+                            )
+                            fig_heatmap.update_layout(height=400)
+                            st.plotly_chart(fig_heatmap, use_container_width=True)
+                        except Exception as e:
+                            st.info("Could not generate allocation heatmap")
                 
                 # Export functionality
                 st.subheader("💾 Export Results")
                 
-                export_data = {
-                    'Summary': pd.DataFrame([{
-                        'Solver_Type': results['solver_type'],
-                        'Target_Year': target_year,
-                        'Target_BOR': target_bor,
-                        'Granularity': granularity,
-                        'Status': results['status']
-                    }]),
-                    'Hospital_BOR': hospital_df,
-                    'Demand_Data': calculate_demand_from_population(
-                        st.session_state.population_data,
-                        st.session_state.admission_data,
-                        st.session_state.alos_data,
-                        target_year,
-                        granularity
-                    )
-                }
-                
-                if allocation_data:
-                    export_data['Allocation_Matrix'] = allocation_df
-                
-                # Unfulfilled demand for Demand Fulfillment solver
-                if results['solver_type'] == 'Demand Fulfillment (Min-Max BOR)' and results['total_unfulfilled'] > 0:
-                    unfulfilled_data = []
-                    for key, amount in results['unfulfilled'].items():
-                        if granularity == "Age Band + MDC":
-                            unfulfilled_data.append({
-                                'MDC_Group': key[0],
-                                'Age_Band': key[1],
-                                'Gender': key[2],
-                                'Unfulfilled_Days': amount
-                            })
-                        else:
-                            unfulfilled_data.append({
-                                'Age_Band': key[0],
-                                'Gender': key[1],
-                                'Unfulfilled_Days': amount
-                            })
+                try:
+                    export_data = {
+                        'Summary': pd.DataFrame([{
+                            'Solver_Type': results['solver_type'],
+                            'Target_Year': target_year,
+                            'Target_BOR': target_bor,
+                            'Granularity': granularity,
+                            'Status': results['status']
+                        }]),
+                        'Hospital_BOR': hospital_df,
+                        'Demand_Data': calculate_demand_from_population(
+                            st.session_state.population_data,
+                            st.session_state.admission_data,
+                            st.session_state.alos_data,
+                            target_year,
+                            granularity
+                        )
+                    }
                     
-                    if unfulfilled_data:
-                        export_data['Unfulfilled_Demand'] = pd.DataFrame(unfulfilled_data)
+                    if allocation_data:
+                        export_data['Allocation_Matrix'] = allocation_df
+                    
+                    # Unfulfilled demand for Demand Fulfillment solver
+                    if results['solver_type'] == 'Demand Fulfillment (Min-Max BOR)' and results['total_unfulfilled'] > 0:
+                        unfulfilled_data = []
+                        for key, amount in results['unfulfilled'].items():
+                            if granularity == "Age Band + MDC":
+                                unfulfilled_data.append({
+                                    'MDC_Group': key[0],
+                                    'Age_Band': key[1],
+                                    'Gender': key[2],
+                                    'Unfulfilled_Days': amount
+                                })
+                            else:
+                                unfulfilled_data.append({
+                                    'Age_Band': key[0],
+                                    'Gender': key[1],
+                                    'Unfulfilled_Days': amount
+                                })
+                        
+                        if unfulfilled_data:
+                            export_data['Unfulfilled_Demand'] = pd.DataFrame(unfulfilled_data)
+                    
+                    # Create Excel file
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        for sheet_name, df in export_data.items():
+                            df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    excel_data = output.getvalue()
+                    
+                    col_export1, col_export2 = st.columns(2)
+                    
+                    with col_export1:
+                        st.download_button(
+                            label="📥 Download Complete Results (Excel)",
+                            data=excel_data,
+                            file_name=f"Bed_Capacity_Results_{target_year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    
+                    with col_export2:
+                        csv_data = hospital_df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download BOR Analysis (CSV)",
+                            data=csv_data,
+                            file_name=f"Hospital_BOR_Analysis_{target_year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
                 
-                # Create Excel file
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    for sheet_name, df in export_data.items():
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
-                
-                excel_data = output.getvalue()
-                
-                col_export1, col_export2 = st.columns(2)
-                
-                with col_export1:
-                    st.download_button(
-                        label="📥 Download Complete Results (Excel)",
-                        data=excel_data,
-                        file_name=f"Bed_Capacity_Results_{target_year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                
-                with col_export2:
-                    csv_data = hospital_df.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download BOR Analysis (CSV)",
-                        data=csv_data,
-                        file_name=f"Hospital_BOR_Analysis_{target_year}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
+                except Exception as e:
+                    st.warning(f"Could not prepare export data: {str(e)}")
                 
                 # Recommendations
                 st.subheader("💡 Recommendations")
@@ -1153,17 +1329,16 @@ def main():
     # Sidebar info and templates
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📋 About")
-    st.sidebar.markdown("""
+    st.sidebar.markdown(f"""
     <div class="info-card">
-        <h4>🏥 Bed Capacity Planning Tool v5.0</h4>
+        <h4>🏥 NUHS Bed Capacity Planning Tool v0.6</h4>
         <p><strong>Features:</strong></p>
         <ul>
+            <li>Editable data tables with validation</li>
+            <li>Dynamic granularity switching</li>
             <li>Dual MILP optimization solvers</li>
-            <li>Age bands: 0-5, 6-40, 41-60, 61-70, 71-80</li>
-            <li>Western Singapore hospitals focus</li>
-            <li>Configurable granularity options</li>
-            <li>Advanced allocation analysis</li>
         </ul>
+        <p><strong>Current Granularity:</strong> {granularity}</p>
         <p><strong>Built with:</strong> Streamlit & PuLP</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1172,8 +1347,8 @@ def main():
     
     if st.sidebar.button("🔄 Generate Templates"):
         sample_pop = generate_sample_population_data()
-        sample_admission = generate_sample_admission_data()
-        sample_alos = generate_sample_alos_data()
+        sample_admission = generate_sample_admission_data(granularity)
+        sample_alos = generate_sample_alos_data(granularity)
         sample_supply = generate_sample_supply_data()
         
         st.sidebar.download_button(
@@ -1187,17 +1362,17 @@ def main():
         st.sidebar.download_button(
             "🏥 Admission Rates Template",
             sample_admission.to_csv(index=False),
-            "admission_template.csv",
+            f"admission_template_{granularity.lower().replace(' + ', '_').replace(' ', '_')}.csv",
             "text/csv",
-            help="Admission rates per 1000 population"
+            help=f"Admission rates per 1000 population ({granularity})"
         )
         
         st.sidebar.download_button(
             "📊 ALOS Template",
             sample_alos.to_csv(index=False),
-            "alos_template.csv",
+            f"alos_template_{granularity.lower().replace(' + ', '_').replace(' ', '_')}.csv",
             "text/csv",
-            help="Average length of stay data"
+            help=f"Average length of stay data ({granularity})"
         )
         
         st.sidebar.download_button(
@@ -1207,6 +1382,26 @@ def main():
             "text/csv",
             help="Hospital capacity by year"
         )
+    
+    # Show helpful tips for first-time users
+    if all([st.session_state.population_data is None, 
+            st.session_state.admission_data is None,
+            st.session_state.alos_data is None,
+            st.session_state.supply_data is None]):
+        
+        st.sidebar.markdown("### 🆘 Quick Start Guide")
+        st.sidebar.markdown("""
+        <div class="info-card">
+            <p><strong>Getting Started:</strong></p>
+            <ol>
+                <li>Choose your granularity above</li>
+                <li>Go to Data Management</li>
+                <li>Click "Load Sample Data"</li>
+                <li>Edit tables as needed</li>
+                <li>Run analysis & optimization</li>
+            </ol>
+        </div>
+        """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
